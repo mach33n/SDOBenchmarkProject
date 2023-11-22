@@ -1,10 +1,16 @@
 import glob
+import os
 import pandas as pd
 import numpy as np
 from PIL import Image
+import matplotlib.pyplot as plt
 
 import torch
 from torch import nn
+from torch.utils.data import TensorDataset, DataLoader
+from tqdm import tqdm
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class SimpleCNN(nn.Module):
     def __init__(self):
@@ -20,9 +26,6 @@ class SimpleCNN(nn.Module):
         x = self.fc2(x)
         return x
 
-# Create the model
-model = SimpleCNN()
-
 class SimpleCNNWein(nn.Module):
     def __init__(self):
         super(SimpleCNNWein, self).__init__()
@@ -36,32 +39,15 @@ class SimpleCNNWein(nn.Module):
         x = x.view(x.size(0), -1)  # Flatten the tensor
         x = nn.functional.relu(self.fc1(x))
         x = self.fc2(x)
-        # compute wavelength using Wein's Law
-        x = 2.898 * 10**-3 / x
+        x = 2.898 * 10**-3 / x  # compute wavelength using Wein's Law
         x = self.fc3(x)
         return x
 
-# Create the model
-model = SimpleCNNWein()
-
-from tqdm import tqdm
-import pandas as pd
-from sklearn.model_selection import train_test_split
-import numpy as np
-from torch.utils.data import TensorDataset, DataLoader
-
-# Get a list of all active region numbers
-all_files = glob.glob("./training/*/*")
-
-# Split all_files into 10 chunks
-chunks = np.array_split(all_files, 40)
-print(len(chunks[0]))
-
-def generateChunk(idxs):
-    wavelengths = ["94","131", "171","193","211","304","335","1700","continuum","magnetogram"]
+def generate_chunk(idxs, metaPath):
+    wavelengths = ["94", "131", "171", "193", "211", "304", "335", "1700", "continuum", "magnetogram"]
     x = np.zeros((len(idxs), 4, 256, 256, 10), dtype=np.int64)
-    y = np.zeros((len(idxs), 1), dtype=np.int64)  # Updated data type to int64
-    df = pd.read_csv('training/meta_data.csv')
+    y = np.zeros((len(idxs), 1), dtype=np.int64)
+    df = pd.read_csv(metaPath)
     peak_flux_dict = {idx: peak_flux for idx, peak_flux in zip(df['id'], df['peak_flux'])}
 
     for i, sample in enumerate(idxs):
@@ -79,7 +65,7 @@ def generateChunk(idxs):
         images = images[:, :, :, :]
         x[i] = images
 
-        idx = path.split("/")[2] + "_"+ path.split("/")[3]
+        idx = path.split("/")[2] + "_" + path.split("/")[3]
         peak_flux = peak_flux_dict[idx]
 
         if peak_flux < 1e-5:
@@ -89,51 +75,49 @@ def generateChunk(idxs):
         else:
             y[i] = 2  # Extreme
 
-    return torch.from_numpy(x.transpose(0,4,2,3,1)), torch.from_numpy(y)
-
-os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
-
-import matplotlib.pyplot as plt
+    return torch.from_numpy(x.transpose(0, 4, 2, 3, 1)).to(device), torch.from_numpy(y).to(device)
 
 def train_model(model, criterion, optimizer, epochs, checkpoint_path):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)  # Move the model to the GPU if available
+    all_files = glob.glob("./training/*/*")
+    chunks = np.array_split(all_files, 40)
+
+    model.to(device)
 
     best_accuracy = 0.0
     loss_curve = []
     accuracy_curve = []
 
-    for epoch in range(epochs):
+    for epoch in tqdm(range(epochs)):
         for i in range(39):
-            train_x, train_y = generateChunk(chunks[i])
+            train_x, train_y = generate_chunk(chunks[i], 'training/meta_data.csv')
             dataset = TensorDataset(train_x, train_y)
             train_loader = DataLoader(dataset, batch_size=32, shuffle=True)
-            model.train()  # Set the model to training mode
+            model.train()
             for inputs, targets in train_loader:
-                inputs, targets = inputs.to(device).float(), targets.to(device).long().reshape(-1)  # Move data to GPU
-                optimizer.zero_grad()  # Reset the gradients
-                outputs = model(inputs)  # Forward pass
-                loss = criterion(outputs, targets)  # Compute loss
-                loss.backward()  # Backward pass
-                optimizer.step()  # Update weights
+                inputs, targets = inputs.float().to(device), targets.long().reshape(-1).to(device)
+                optimizer.zero_grad()
+                outputs = model(inputs)
+                loss = criterion(outputs, targets)
+                loss.backward()
+                optimizer.step()
 
-        train_x, train_y = generateChunk(chunks[39])
+        train_x, train_y = generate_chunk(chunks[39], 'training/meta_data.csv')
         dataset = TensorDataset(train_x, train_y)
         val_loader = DataLoader(dataset, batch_size=32, shuffle=True)
-        model.eval()  # Set the model to evaluation mode
-        with torch.no_grad():  # No need to track gradients in validation phase
+        model.eval()
+        with torch.no_grad():
             total_loss = 0
             total_correct = 0
             total_samples = 0
             for inputs, targets in val_loader:
-                inputs, targets = inputs.to(device).float(), targets.to(device).long().reshape(-1)  # Move data to GPU
+                inputs, targets = inputs.float().to(device), targets.long().reshape(-1).to(device)
                 outputs = model(inputs)
                 loss = criterion(outputs, targets)
                 total_loss += loss.item() * len(targets)
                 _, predicted = torch.max(outputs, 1)
                 total_correct += torch.sum(predicted == targets)
                 total_samples += len(targets)
-        
+
         avg_loss = total_loss / total_samples
         accuracy = total_correct / total_samples
         print(f'Epoch {epoch+1}/{epochs}, Loss: {avg_loss}, Accuracy: {accuracy}')
@@ -141,12 +125,10 @@ def train_model(model, criterion, optimizer, epochs, checkpoint_path):
         loss_curve.append(avg_loss)
         accuracy_curve.append(accuracy)
 
-        # Save checkpoint if accuracy improves
         if accuracy > best_accuracy:
             best_accuracy = accuracy
             torch.save(model.state_dict(), checkpoint_path)
 
-    # Plot and save loss curve
     plt.plot(loss_curve)
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
@@ -154,7 +136,6 @@ def train_model(model, criterion, optimizer, epochs, checkpoint_path):
     plt.savefig('loss_curve.png')
     plt.close()
 
-    # Plot and save accuracy curve
     plt.plot(accuracy_curve)
     plt.xlabel('Epoch')
     plt.ylabel('Accuracy')
@@ -162,8 +143,42 @@ def train_model(model, criterion, optimizer, epochs, checkpoint_path):
     plt.savefig('accuracy_curve.png')
     plt.close()
 
+os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
-mod = SimpleCNN()
-train_model(mod, nn.CrossEntropyLoss(), torch.optim.Adam(mod.parameters()), 10, './')
-mod = SimpleCNNWein()
-train_model(mod, nn.CrossEntropyLoss(), torch.optim.Adam(mod.parameters()), 10, './')
+def eval_model(model, criterion, model_path):
+    all_files = glob.glob("./test/*/*")
+    chunks = np.array_split(all_files, 40)
+
+    # Eval checkpoint model and print accuracy score
+    model.load_state_dict(torch.load(model_path))
+    model.eval()
+
+    model.to(device)
+
+    test_loss = 0
+    correct = 0
+    total = 0
+
+    with torch.no_grad():
+        for i in range(40):
+            train_x, train_y = generate_chunk(chunks[i], 'test/meta_data.csv')
+            dataset = TensorDataset(train_x, train_y)
+            test_loader = DataLoader(dataset, batch_size=32, shuffle=True)
+            for data, target in test_loader:
+                data, target = data.to(device).float(), target.to(device).long().reshape(-1)
+                output = model(data)
+                test_loss += criterion(output, target).item()
+                _, predicted = output.max(1)
+                total += target.size(0)
+                correct += predicted.eq(target).sum().item()
+
+    accuracy = 100. * correct / total
+    print(f"Model : {model_path} Accuracy: {accuracy}%")
+
+model = SimpleCNN().to(device)
+train_model(model, nn.CrossEntropyLoss(), torch.optim.Adam(model.parameters()), 5, './SimpleCNN.mod')
+eval_model(model, nn.CrossEntropyLoss(), './SimpleCNN.mod')
+
+model = SimpleCNNWein().to(device)
+train_model(model, nn.CrossEntropyLoss(), torch.optim.Adam(model.parameters()), 5, './SimpleCNNWein.mod')
+eval_model(model, nn.CrossEntropyLoss(), './SimpleCNNWein.mod')
