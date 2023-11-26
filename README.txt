@@ -1,3 +1,7 @@
+# SDO BENCHMARK Training Script
+In order to execute, uncomment both models within the SDOTrainScript.py and run the script. Data is very large so training may take some time. As of now, we've trained both models for about 5 epochs on all of the training data producing test accuracies of about %80. Additional modifications may come soon to improve these results.
+
+# SDODataset Documentation
 Noisy images
 ============
 
